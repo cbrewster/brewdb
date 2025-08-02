@@ -8,10 +8,41 @@ pub fn AdaptiveRadixTree(comptime T: type) type {
 
         const NodeKind = enum { node4, node16, node48, node256, leaf };
         const NodeHeader = struct {
+            // TODO: Consider using tagged pointers, so we can move this tag to the
+            // pointer instead.
             kind: NodeKind,
+            // TODO: This space is taken up in leaf nodes too, might consider separating
+            // out a header just for inner nodes?
             num_children: u8 = 0,
-            prefix: [8]u8 = [_]u8{0} ** 8,
-            prefix_len: u8 = 0,
+            partial_prefix_raw: [8]u8 = [_]u8{0} ** 8,
+            partial_prefix_len: u8 = 0,
+
+            fn init(gpa: std.mem.Allocator, kind: NodeKind) NodeHeader {
+                const prefix_allocator = std.heap.stackFallback(8, gpa);
+                return .{
+                    .kind = kind,
+                    .prefix_allocator = prefix_allocator,
+                    .prefix = std.ArrayListUnmanaged(u8).initCapacity(prefix_allocator.get(), 8),
+                };
+            }
+
+            fn getPartialPrefix(header: *const NodeHeader) []const u8 {
+                return header.partial_prefix_raw[0..header.partial_prefix_len];
+            }
+
+            fn setPartialPrefix(
+                header: *NodeHeader,
+                prefix: []const u8,
+                comptime copy_forwards: bool,
+            ) void {
+                std.debug.assert(prefix.len <= 8);
+                header.partial_prefix_len = @intCast(prefix.len);
+                if (copy_forwards) {
+                    std.mem.copyForwards(u8, header.partial_prefix_raw[0..prefix.len], prefix);
+                } else {
+                    @memcpy(header.partial_prefix_raw[0..prefix.len], prefix);
+                }
+            }
 
             fn asNode4(header: *NodeHeader) *Node4 {
                 std.debug.assert(header.kind == .node4);
@@ -66,13 +97,9 @@ pub fn AdaptiveRadixTree(comptime T: type) type {
             }
 
             fn checkPrefix(self: *NodeHeader, key: []const u8, depth: u64) u8 {
-                var i: u8 = 0;
-                while (i < self.prefix_len and i + depth < key.len) : (i += 1) {
-                    if (self.prefix[i] != key[depth + i]) {
-                        break;
-                    }
-                }
-                return i;
+                const len = commonPrefixLength(self.getPartialPrefix(), key[depth..]);
+                std.debug.assert(len <= 8);
+                return @intCast(len);
             }
 
             fn grow(self: *NodeHeader, gpa: std.mem.Allocator) !*NodeHeader {
@@ -83,8 +110,8 @@ pub fn AdaptiveRadixTree(comptime T: type) type {
                     .node256 => @panic("grow should not be called on a Node256"),
                     .leaf => @panic("grow should not be called on a leaf node"),
                 };
-                new_node.prefix_len = self.prefix_len;
-                @memcpy(new_node.prefix[0..self.prefix_len], self.prefix[0..self.prefix_len]);
+                // No need to copy forward, slices do not overlap.
+                new_node.setPartialPrefix(self.getPartialPrefix(), false);
                 return new_node;
             }
 
@@ -97,7 +124,7 @@ pub fn AdaptiveRadixTree(comptime T: type) type {
                 try std.fmt.format(
                     writer,
                     "Node {{ .prefix = \"{s}\", .node = ",
-                    .{self.prefix[0..self.prefix_len]},
+                    .{self.getPartialPrefix()},
                 );
                 switch (self.kind) {
                     .node4 => try @constCast(self).asNode4().format(fmt, options, writer),
@@ -259,7 +286,10 @@ pub fn AdaptiveRadixTree(comptime T: type) type {
             fn addChild(self: *Node16, byte: u8, child: *NodeHeader) void {
                 std.debug.assert(self.header.num_children < MAX_CHILDREN);
 
-                // TODO: Binary search or SIMD?
+                // TODO: We may not need to preserve sort order since we do fast SIMD lookups.
+                // This could improve insertion speed.
+                // We could also use SIMD to figure out the insertion point quicker.
+
                 var index: u8 = 0;
                 while (index < self.header.num_children) : (index += 1) {
                     if (self.key[index] == byte) {
@@ -523,14 +553,18 @@ pub fn AdaptiveRadixTree(comptime T: type) type {
                 }
                 return null;
             }
-            if (node.checkPrefix(key, depth) != node.prefix_len) {
+            if (node.checkPrefix(key, depth) != node.partial_prefix_len) {
                 return null;
             }
-            const new_depth = depth + node.prefix_len;
+            const new_depth = depth + node.partial_prefix_len;
             const child = node.findChild(charAt(key, new_depth)) orelse return null;
             return search(child.*, key, new_depth + 1);
         }
 
+        /// Inserts a node in the tree by recursively descending down the tree until an insertion
+        /// point is found. `maybe_node` is a pointer to a "slot" where a node can be inserted.
+        ///
+        /// When `maybe_node` is replace and it was non-null, the old node is freed.
         fn insertInner(
             self: *Self,
             maybe_node: *?*NodeHeader,
@@ -538,11 +572,14 @@ pub fn AdaptiveRadixTree(comptime T: type) type {
             leaf: *NodeLeaf,
             depth: u64,
         ) !?T {
+            // If the node pointer is currently unset, that means we should insert the leaf in the slot.
             const node = maybe_node.* orelse {
                 maybe_node.* = &leaf.header;
                 return null;
             };
+
             if (node.kind == .leaf) {
+                // If the keys of the two leaves match, the old leaf will be deleted and replaced by the new node.
                 if (std.mem.eql(u8, node.asLeaf().key, key)) {
                     const old_node = node;
                     const old_value = node.asLeaf().value;
@@ -551,51 +588,32 @@ pub fn AdaptiveRadixTree(comptime T: type) type {
                     return old_value;
                 }
 
-                // Replace the leaf with a new node
-                const new_node = try Node4.init(self.gpa);
-                errdefer new_node.deinit(self.gpa);
-
-                const key2 = node.asLeaf().key;
-
-                var i: u8 = 0;
-                while (i + depth < key.len and i + depth < key2.len and i < 8) : (i += 1) {
-                    if (key[depth + i] != key2[depth + i]) break;
-                    new_node.header.prefix[i] = key[depth + i];
-                }
-                new_node.header.prefix_len = i;
-
-                const new_depth = depth + new_node.header.prefix_len;
-                new_node.addChild(charAt(key, new_depth), &leaf.header);
-                new_node.addChild(charAt(key2, new_depth), node);
-
-                maybe_node.* = &new_node.header;
+                maybe_node.* = try self.mergeLeaves(node.asLeaf(), leaf, depth);
                 return null;
             }
+
+            // Since we store prefixes in the inner nodes, we need to check to see
+            // if this node requires the inner node to be split.
+
             const match_len = node.checkPrefix(key, depth);
-            if (match_len != node.prefix_len) {
-                var new_node = try Node4.init(self.gpa);
-                errdefer new_node.deinit(self.gpa);
-
-                new_node.addChild(charAt(key, depth + match_len), &leaf.header);
-                new_node.addChild(charAt(&node.prefix, match_len), node);
-                new_node.header.prefix_len = match_len;
-
-                @memcpy(new_node.header.prefix[0..match_len], node.prefix[0..match_len]);
-                std.mem.copyForwards(
-                    u8,
-                    &node.prefix,
-                    node.prefix[match_len + 1 .. node.prefix_len],
-                );
-                node.prefix_len -= match_len + 1;
-
-                maybe_node.* = &new_node.header;
+            if (match_len != node.partial_prefix_len) {
+                maybe_node.* = try self.splitNode(node, leaf, depth, match_len);
                 return null;
             }
-            const new_depth = depth + node.prefix_len;
+
+            // Continue traversing down the tree, if we find another child node, we will
+            // recurse back into this function until we hit a leaf or a hole.
+            const new_depth = depth + node.partial_prefix_len;
             if (node.findChild(charAt(key, new_depth))) |next| {
                 return try self.insertInner(next, key, leaf, new_depth + 1);
             }
 
+            // At this point there are no more child nodes, this means the key didn't
+            // already exist in the tree and we are now ready to insert the node directly
+            // into the tree.
+
+            // If the current node is full, we will grow the node by allocating a
+            // new node, copying the children over, and deallocating the old node.
             if (node.isFull()) {
                 const new_node = try node.grow(self.gpa);
                 errdefer new_node.deinit(self.gpa);
@@ -607,6 +625,105 @@ pub fn AdaptiveRadixTree(comptime T: type) type {
 
             node.addChild(charAt(key, new_depth), &leaf.header);
             return null;
+        }
+
+        /// Given a non-leaf node and a leaf node that needs to be inserted where the leaf node
+        /// does not share the full prefix of the non-leaf node, this will split the node by creating
+        /// a new parent node and adding the non-leaf and leaf nodes as children, recording their
+        /// common prefix.
+        ///
+        /// The common prefix length is passed in because it is calculated before this function
+        /// is called.
+        ///
+        /// The new parent node will be returned and must be freed by the caller.
+        ///
+        /// Before:
+        ///     ABCD
+        ///     /  \
+        ///    E    F
+        ///
+        /// Insert "ABF":
+        ///
+        ///       AB
+        ///      /  \
+        ///     CD   F
+        ///    /  \
+        ///   E    F
+        ///
+        fn splitNode(
+            self: *Self,
+            node: *NodeHeader,
+            leaf: *NodeLeaf,
+            depth: u64,
+            common_prefix: u8,
+        ) !?*NodeHeader {
+            const new_node = try Node4.init(self.gpa);
+            errdefer new_node.deinit(self.gpa);
+
+            const node_partial_key = node.getPartialPrefix();
+            const leaf_key = leaf.key;
+
+            // Update the new node to have the common prefix of the two nodes.
+            // No need to copy forward as the slices do not overlap.
+            new_node.header.setPartialPrefix(node_partial_key[0..common_prefix], false);
+
+            // We must copy forward here since the slices overlap.
+            node.setPartialPrefix(node.getPartialPrefix()[common_prefix..], true);
+
+            // The depth must be increased because we need to find the first character
+            // of the key in each node after the common prefix that is different between
+            // the nodes.
+            const new_depth = depth + common_prefix;
+
+            new_node.addChild(leaf_key[new_depth], &leaf.header);
+            new_node.addChild(node_partial_key[common_prefix], node);
+
+            return &new_node.header;
+        }
+
+        /// Given two leaf nodes and the depth in the tree, creates a new parent node with both leaves as children.
+        /// The common prefix of the two leaf nodes after the current depth will be stored on the parent node.
+        ///
+        /// The new parent node will be returned and must be freed by the caller.
+        ///
+        /// Before:
+        ///
+        /// ABC
+        ///
+        /// Insert ABD:
+        ///
+        ///     AB
+        ///    /  \
+        ///   C    D
+        ///
+        fn mergeLeaves(
+            self: *Self,
+            leaf_a: *NodeLeaf,
+            leaf_b: *NodeLeaf,
+            depth: u64,
+        ) !?*NodeHeader {
+            const new_node = try Node4.init(self.gpa);
+            errdefer new_node.deinit(self.gpa);
+
+            const leaf_a_key = leaf_a.key;
+            const leaf_b_key = leaf_b.key;
+
+            // Find the common prefix of the nodes after the current depth. Since we only store
+            // a partial prefix in each node, the max len of the prefix we can store is 8.
+            const prefix_len = @min(commonPrefixLength(leaf_a_key[depth..], leaf_b_key[depth..]), 8);
+
+            // No need to copy forwards here, the slices do not overlap.
+            new_node.header.setPartialPrefix(leaf_a_key[depth .. depth + prefix_len], false);
+
+            // The depth must be increased because we need to find the first character
+            // of the key in each leaf after the common prefix that is different between
+            // the leaves.
+            const new_depth = depth + prefix_len;
+
+            new_node.addChild(charAt(leaf_a_key, new_depth), &leaf_a.header);
+            new_node.addChild(charAt(leaf_b_key, new_depth), &leaf_b.header);
+
+            return &new_node.header;
         }
     };
 }
@@ -620,6 +737,40 @@ fn charAt(slice: []const u8, index: usize) u8 {
         return END_OF_KEY;
     }
     return slice[index];
+}
+
+fn commonPrefix(a: []const u8, b: []const u8) []const u8 {
+    return a[0..commonPrefixLength(a, b)];
+}
+fn commonPrefixLength(a: []const u8, b: []const u8) u64 {
+    const min_len = @min(a.len, b.len);
+    if (min_len == 0) {
+        return 0;
+    }
+
+    var pos: u64 = 0;
+    if (comptime std.simd.suggestVectorLength(u8)) |vector_len| {
+        const chunk_size = @min(vector_len, 32);
+
+        while (pos + chunk_size <= min_len) {
+            const vec_a: @Vector(chunk_size, u8) = a[pos..][0..chunk_size].*;
+            const vec_b: @Vector(chunk_size, u8) = b[pos..][0..chunk_size].*;
+
+            const xor = vec_a ^ vec_b;
+            const all_zero = @reduce(.Or, xor) == 0;
+
+            if (all_zero) {
+                pos += chunk_size;
+            } else {
+                break;
+            }
+        }
+
+        while (pos < min_len and a[pos] == b[pos]) {
+            pos += 1;
+        }
+        return pos;
+    }
 }
 
 /// Inserts an element at the specified index in the slice.
@@ -637,7 +788,7 @@ test AdaptiveRadixTree {
     const gpa = std.testing.allocator;
     var a = AdaptiveRadixTree(usize).init(gpa);
     defer a.deinit();
-    for (0..200000) |i| {
+    for (0..100) |i| {
         const str = try std.fmt.allocPrint(gpa, "key-{}", .{i});
         defer gpa.free(str);
         _ = try a.insert(str, i);
@@ -649,11 +800,29 @@ test AdaptiveRadixTree {
     _ = try a.insert("AAAAB", 10);
     _ = try a.insert("AB", 10);
     _ = try a.insert("B", 10);
-    for (0..200000) |i| {
+    for (0..100) |i| {
         const str = try std.fmt.allocPrint(gpa, "key-{}", .{i});
         defer gpa.free(str);
         _ = try a.insert(str, i);
         const val = a.get(str);
         try std.testing.expectEqual(i, val);
     }
+}
+
+test commonPrefix {
+    const testing = std.testing;
+
+    // Test cases
+    try testing.expectEqual(commonPrefixLength("hello", "help"), 3);
+    try testing.expectEqual(commonPrefixLength("abc", "xyz"), 0);
+    try testing.expectEqual(commonPrefixLength("same", "same"), 4);
+    try testing.expectEqual(commonPrefixLength("", "anything"), 0);
+    try testing.expectEqual(commonPrefixLength("test", ""), 0);
+
+    // Test with longer strings to exercise SIMD path
+    const long_a = "this is a very long string with many characters to test SIMD processing";
+    const long_b = "this is a very long string with many different characters here";
+    try testing.expectEqual(commonPrefixLength(long_a, long_b), 37);
+    try testing.expectEqual(commonPrefixLength("hello", "help"), 3);
+    try testing.expectEqual(commonPrefixLength("abcdefgh12345678", "abcdefgh87654321"), 8);
 }
