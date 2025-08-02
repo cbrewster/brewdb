@@ -1,4 +1,5 @@
 const std = @import("std");
+const afl = @import("afl_kit");
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -43,4 +44,17 @@ pub fn build(b: *std.Build) void {
 
     const test_debug_step = b.step("test-debug", "Run unit tests under lldb");
     test_debug_step.dependOn(&lldb.step);
+
+    const fuzz = b.step("fuzz", "Generate an instrumented executable for AFL++");
+    const afl_obj = b.addObject(.{
+        .name = "brewdb_fuzz_obj",
+        .root_source_file = b.path("src/fuzz.zig"),
+        .target = target,
+        .optimize = .Debug,
+    });
+    afl_obj.root_module.stack_check = false;
+    afl_obj.root_module.link_libc = true;
+    afl_obj.root_module.fuzz = true;
+    const afl_fuzz = afl.addInstrumentedExe(b, target, optimize, null, true, afl_obj);
+    if (afl_fuzz) |f| fuzz.dependOn(&b.addInstallBinFile(f, "brewdb-afl").step);
 }

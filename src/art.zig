@@ -29,15 +29,6 @@ pub fn AdaptiveRadixTree(comptime T: type) type {
             // validate the final key value stored in the leaf node.
             prefix_len: u64 = 0,
 
-            fn init(gpa: std.mem.Allocator, kind: NodeKind) NodeHeader {
-                const prefix_allocator = std.heap.stackFallback(8, gpa);
-                return .{
-                    .kind = kind,
-                    .prefix_allocator = prefix_allocator,
-                    .prefix = std.ArrayListUnmanaged(u8).initCapacity(prefix_allocator.get(), 8),
-                };
-            }
-
             /// Returns the compressed key path stored inside this node.
             ///
             /// If the prefix is small enough, it can be stored inline in the node.
@@ -239,16 +230,12 @@ pub fn AdaptiveRadixTree(comptime T: type) type {
             const MAX_CHILDREN: u16 = 4;
 
             header: NodeHeader,
-            key: [MAX_CHILDREN]u8,
-            children: [MAX_CHILDREN]?*NodeHeader,
+            key: [MAX_CHILDREN]u8 = [_]u8{0} ** MAX_CHILDREN,
+            children: [MAX_CHILDREN]?*NodeHeader = [_]?*NodeHeader{null} ** MAX_CHILDREN,
 
             fn init(gpa: std.mem.Allocator) !*Node4 {
                 const node = try gpa.create(Node4);
-                node.* = .{
-                    .header = .{ .kind = .node4 },
-                    .key = [_]u8{0} ** MAX_CHILDREN,
-                    .children = [_]?*NodeHeader{null} ** MAX_CHILDREN,
-                };
+                node.* = .{ .header = .{ .kind = .node4 } };
                 return node;
             }
 
@@ -274,14 +261,14 @@ pub fn AdaptiveRadixTree(comptime T: type) type {
                     try std.fmt.format(writer, "\n", .{});
                     try pad(writer, indent);
                     try std.fmt.format(writer, "\"{c}\": ", .{key});
-                    try child.?.print(writer, depth + self.header.prefix_len, indent);
+                    try child.?.print(writer, depth + 1 + self.header.prefix_len, indent);
                 }
             }
 
             fn findChild(self: *Node4, byte: u8) ?*?*NodeHeader {
                 std.debug.assert(self.header.num_children <= MAX_CHILDREN);
 
-                for (self.key, 0..) |key_byte, i| {
+                for (self.key[0..self.header.num_children], 0..) |key_byte, i| {
                     if (key_byte == byte) {
                         return &self.children[i];
                     }
@@ -338,16 +325,12 @@ pub fn AdaptiveRadixTree(comptime T: type) type {
             const MAX_CHILDREN: u16 = 16;
 
             header: NodeHeader,
-            key: [MAX_CHILDREN]u8,
-            children: [MAX_CHILDREN]?*NodeHeader,
+            key: [MAX_CHILDREN]u8 = [_]u8{0} ** MAX_CHILDREN,
+            children: [MAX_CHILDREN]?*NodeHeader = [_]?*NodeHeader{null} ** MAX_CHILDREN,
 
             fn init(gpa: std.mem.Allocator) !*Node16 {
                 const node = try gpa.create(Node16);
-                node.* = .{
-                    .header = .{ .kind = .node16 },
-                    .key = [_]u8{0} ** MAX_CHILDREN,
-                    .children = [_]?*NodeHeader{null} ** MAX_CHILDREN,
-                };
+                node.* = .{ .header = .{ .kind = .node16 } };
                 return node;
             }
 
@@ -373,7 +356,7 @@ pub fn AdaptiveRadixTree(comptime T: type) type {
                     try std.fmt.format(writer, "\n", .{});
                     try pad(writer, indent);
                     try std.fmt.format(writer, "\"{c}\": ", .{key});
-                    try child.?.print(writer, depth + self.header.prefix_len, indent);
+                    try child.?.print(writer, depth + 1 + self.header.prefix_len, indent);
                 }
             }
 
@@ -453,15 +436,11 @@ pub fn AdaptiveRadixTree(comptime T: type) type {
 
             header: NodeHeader,
             key: [256]u8 = [_]u8{EMPTY} ** 256,
-            children: [MAX_CHILDREN]?*NodeHeader,
+            children: [MAX_CHILDREN]?*NodeHeader = [_]?*NodeHeader{null} ** MAX_CHILDREN,
 
             fn init(gpa: std.mem.Allocator) !*Node48 {
                 const node = try gpa.create(Node48);
-                node.* = .{
-                    .header = .{ .kind = .node48 },
-                    .key = [_]u8{0} ** 256,
-                    .children = [_]?*NodeHeader{null} ** MAX_CHILDREN,
-                };
+                node.* = .{ .header = .{ .kind = .node48 } };
                 return node;
             }
 
@@ -480,17 +459,14 @@ pub fn AdaptiveRadixTree(comptime T: type) type {
                 depth: u64,
                 indent: u64,
             ) anyerror!void {
-                for (
-                    self.key[0..self.header.num_children],
-                    0..,
-                ) |index, key| {
+                for (self.key, 0..) |index, key| {
                     if (index == EMPTY) continue;
 
                     const child = self.children[index];
                     try std.fmt.format(writer, "\n", .{});
                     try pad(writer, indent);
                     try std.fmt.format(writer, "\"{c}\": ", .{@as(u8, @intCast(key))});
-                    try child.?.print(writer, depth + self.header.prefix_len, indent);
+                    try child.?.print(writer, depth + 1 + self.header.prefix_len, indent);
                 }
             }
 
@@ -519,9 +495,9 @@ pub fn AdaptiveRadixTree(comptime T: type) type {
                 const new_node = try Node256.init(gpa);
                 errdefer new_node.deinit(gpa);
 
-                for (self.key, 0..) |key_byte, i| {
-                    if (key_byte == EMPTY) continue;
-                    new_node.addChild(key_byte, self.children[i].?);
+                for (self.key, 0..) |index, key_byte| {
+                    if (index == EMPTY) continue;
+                    new_node.addChild(@as(u8, @intCast(key_byte)), self.children[index].?);
                 }
 
                 // Ownership of the children is transferred to the new node.
@@ -532,12 +508,12 @@ pub fn AdaptiveRadixTree(comptime T: type) type {
             fn min(self: *const Node48) *const NodeLeaf {
                 std.debug.assert(self.header.num_children > 0);
 
-                for (self.key, 0..) |key, index| {
-                    if (key != EMPTY) {
-                        const child = self.children[index];
-                        std.debug.assert(child != null);
-                        return child.?.min();
-                    }
+                for (self.key) |index| {
+                    if (index == EMPTY) continue;
+
+                    const child = self.children[index];
+                    std.debug.assert(child != null);
+                    return child.?.min();
                 }
 
                 unreachable;
@@ -548,14 +524,11 @@ pub fn AdaptiveRadixTree(comptime T: type) type {
             const MAX_CHILDREN: u16 = 256;
 
             header: NodeHeader,
-            children: [MAX_CHILDREN]?*NodeHeader,
+            children: [MAX_CHILDREN]?*NodeHeader = [_]?*NodeHeader{null} ** MAX_CHILDREN,
 
             fn init(gpa: std.mem.Allocator) !*Node256 {
                 const node = try gpa.create(Node256);
-                node.* = .{
-                    .header = .{ .kind = .node256, .num_children = 0 },
-                    .children = [_]?*NodeHeader{null} ** MAX_CHILDREN,
-                };
+                node.* = .{ .header = .{ .kind = .node256, .num_children = 0 } };
                 return node;
             }
 
@@ -574,16 +547,13 @@ pub fn AdaptiveRadixTree(comptime T: type) type {
                 depth: u64,
                 indent: u64,
             ) anyerror!void {
-                for (
-                    self.children[0..self.header.num_children],
-                    0..,
-                ) |child, key| {
+                for (self.children, 0..) |child, key| {
                     if (child == null) continue;
 
                     try std.fmt.format(writer, "\n", .{});
                     try pad(writer, indent);
                     try std.fmt.format(writer, "\"{c}\": ", .{@as(u8, @intCast(key))});
-                    try child.?.print(writer, depth + self.header.prefix_len, indent);
+                    try child.?.print(writer, depth + 1 + self.header.prefix_len, indent);
                 }
             }
 
@@ -655,17 +625,28 @@ pub fn AdaptiveRadixTree(comptime T: type) type {
         }
 
         pub fn insert(self: *Self, key: []const u8, value: T) !?T {
-            const leaf = try NodeLeaf.init(self.gpa, key, value);
-            errdefer leaf.deinit(self.gpa);
+            try validateKey(key);
 
-            return try self.insertInner(&self.root, key, leaf, 0);
+            return try self.insertInner(&self.root, key, value, 0);
         }
 
         pub fn get(self: *Self, key: []const u8) ?T {
+            validateKey(key) catch return null;
+
             if (search(self.root, key, 0)) |leaf| {
                 return leaf.value;
             }
+
             return null;
+        }
+
+        fn validateKey(key: []const u8) !void {
+            if (key.len == 0) {
+                return error.EmptyKey;
+            }
+            if (std.mem.containsAtLeastScalar(u8, key, 1, END_OF_KEY)) {
+                return error.InvalidKey;
+            }
         }
 
         fn search(maybe_node: ?*NodeHeader, key: []const u8, depth: u64) ?*NodeLeaf {
@@ -707,11 +688,12 @@ pub fn AdaptiveRadixTree(comptime T: type) type {
             self: *Self,
             maybe_node: *?*NodeHeader,
             key: []const u8,
-            leaf: *NodeLeaf,
+            value: T,
             depth: u64,
         ) !?T {
             // If the node pointer is currently unset, that means we should insert the leaf in the slot.
             const node = maybe_node.* orelse {
+                const leaf = try NodeLeaf.init(self.gpa, key, value);
                 maybe_node.* = &leaf.header;
                 return null;
             };
@@ -721,14 +703,20 @@ pub fn AdaptiveRadixTree(comptime T: type) type {
                 // TODO: As an optimization we could defer the allocation of the new leaf so we could
                 // update the existing leaf in-place instead.
                 if (std.mem.eql(u8, node.asLeaf().key, key)) {
-                    const old_node = node;
                     const old_value = node.asLeaf().value;
-                    maybe_node.* = &leaf.header;
-                    old_node.deinit(self.gpa);
+                    node.asLeaf().value = value;
                     return old_value;
                 }
 
-                maybe_node.* = try splitLeaf(self.gpa, node.asLeaf(), leaf, depth);
+                const leaf = try NodeLeaf.init(self.gpa, key, value);
+                errdefer leaf.deinit(self.gpa);
+
+                maybe_node.* = try splitLeaf(
+                    self.gpa,
+                    node.asLeaf(),
+                    leaf,
+                    depth,
+                );
                 return null;
             }
 
@@ -737,7 +725,16 @@ pub fn AdaptiveRadixTree(comptime T: type) type {
 
             const match_len = node.checkPrefix(key, depth);
             if (match_len != node.prefix_len) {
-                maybe_node.* = try splitInner(self.gpa, node, leaf, depth, match_len);
+                const leaf = try NodeLeaf.init(self.gpa, key, value);
+                errdefer leaf.deinit(self.gpa);
+
+                maybe_node.* = try splitInner(
+                    self.gpa,
+                    node,
+                    leaf,
+                    depth,
+                    match_len,
+                );
                 return null;
             }
 
@@ -745,15 +742,20 @@ pub fn AdaptiveRadixTree(comptime T: type) type {
             // recurse back into this function until we hit a leaf or a hole.
             const new_depth = depth + node.prefix_len;
             if (node.findChild(charAt(key, new_depth))) |next| {
-                return try self.insertInner(next, key, leaf, new_depth + 1);
+                // We add 1 to the depth to account for the key byte stored in the inner node.
+                return try self.insertInner(next, key, value, new_depth + 1);
             }
 
             // At this point there are no more child nodes, this means the key didn't
             // already exist in the tree and we are now ready to insert the node directly
             // into the tree.
+            //
+            const leaf = try NodeLeaf.init(self.gpa, key, value);
+            errdefer leaf.deinit(self.gpa);
 
             // If the current node is full, we will grow the node by allocating a
             // new node, copying the children over, and deallocating the old node.
+
             if (node.isFull()) {
                 const new_node = try node.grow(self.gpa);
                 errdefer new_node.deinit(self.gpa);
@@ -782,7 +784,7 @@ pub fn AdaptiveRadixTree(comptime T: type) type {
         ///     /  \
         ///    E    F
         ///
-        /// Insert "ABF":
+        /// Insert "ABF" common prefix 2:
         ///
         ///       AB
         ///      /  \
@@ -800,23 +802,27 @@ pub fn AdaptiveRadixTree(comptime T: type) type {
             const new_node = try Node4.init(gpa);
             errdefer new_node.deinit(gpa);
 
-            const node_partial_key = node.getPrefix(depth);
+            var node_partial_key = node.getPrefix(depth);
             const leaf_key = leaf.key;
-
-            // Update the new node to have the common prefix of the two nodes.
-            // No need to copy forward as the slices do not overlap.
-            new_node.header.setPrefix(node_partial_key[0..common_prefix_len], false);
-
-            // We must copy forward here since the slices may overlap.
-            node.setPrefix(node.getPrefix(depth)[common_prefix_len..], true);
 
             // The depth must be increased because we need to find the first character
             // of the key in each node after the common prefix that is different between
             // the nodes.
             const new_depth = depth + common_prefix_len;
 
+            // Before mucking with the prefix keys, add the nodes to the new parent
+            // using the first differentiating character in each's key.
             new_node.addChild(charAt(leaf_key, new_depth), &leaf.header);
             new_node.addChild(charAt(node_partial_key, common_prefix_len), node);
+
+            // Update the new node to have the common prefix of the two nodes.
+            // No need to copy forward as the slices do not overlap.
+            new_node.header.setPrefix(node_partial_key[0..common_prefix_len], false);
+
+            // We add one to the common prefix since 1 byte is used as a key
+            // byte to distinguish the two children.
+            // We must copy forward here since the slices may overlap.
+            node.setPrefix(node.getPrefix(depth)[common_prefix_len + 1 ..], true);
 
             return &new_node.header;
         }
@@ -905,12 +911,13 @@ fn commonPrefixLength(a: []const u8, b: []const u8) u64 {
                 break;
             }
         }
-
-        while (pos < min_len and a[pos] == b[pos]) {
-            pos += 1;
-        }
-        return pos;
     }
+
+    while (pos < min_len and a[pos] == b[pos]) {
+        pos += 1;
+    }
+
+    return pos;
 }
 
 fn pad(writer: anytype, amount: u64) !void {
@@ -1032,7 +1039,7 @@ test "splitNode with small prefix" {
     defer inner_b.deinit(gpa);
 
     try testing.expectEqualStrings("A", inner_b.getPrefix(0));
-    try testing.expectEqualStrings("B", inner_a.getPrefix(inner_b.prefix_len));
+    try testing.expectEqualStrings("", inner_a.getPrefix(inner_b.prefix_len));
 }
 
 test "splitNode with large prefix" {
@@ -1041,24 +1048,24 @@ test "splitNode with large prefix" {
 
     const Tree = AdaptiveRadixTree(usize);
 
-    const leaf_a = try Tree.NodeLeaf.init(gpa, "0000000001/0000000001", 1);
+    const leaf_a = try Tree.NodeLeaf.init(gpa, "123456789_1/123456789_1", 1);
     errdefer leaf_a.deinit(gpa);
 
-    const leaf_b = try Tree.NodeLeaf.init(gpa, "0000000001/0000000002", 1);
+    const leaf_b = try Tree.NodeLeaf.init(gpa, "123456789_1/123456789_2", 1);
     errdefer leaf_b.deinit(gpa);
 
     const inner_a = try Tree.splitLeaf(gpa, leaf_a, leaf_b, 0);
     errdefer inner_a.deinit(gpa);
 
-    try testing.expectEqualStrings("0000000001/000000000", inner_a.getPrefix(0));
+    try testing.expectEqualStrings("123456789_1/123456789_", inner_a.getPrefix(0));
 
-    const leaf_c = try Tree.NodeLeaf.init(gpa, "0000000002/0000000001", 1);
+    const leaf_c = try Tree.NodeLeaf.init(gpa, "123456789_2/123456789_1", 1);
     errdefer leaf_c.deinit(gpa);
 
     const common_prefix_len = inner_a.checkPrefix(leaf_c.key, 0);
     const inner_b = try Tree.splitInner(gpa, inner_a, leaf_c, 0, common_prefix_len);
     defer inner_b.deinit(gpa);
 
-    try testing.expectEqualStrings("000000000", inner_b.getPrefix(0));
-    try testing.expectEqualStrings("1/000000000", inner_a.getPrefix(inner_b.prefix_len));
+    try testing.expectEqualStrings("123456789_", inner_b.getPrefix(0));
+    try testing.expectEqualStrings("/123456789_", inner_a.getPrefix(inner_b.prefix_len + 1));
 }
