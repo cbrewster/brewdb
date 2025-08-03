@@ -1,5 +1,5 @@
 const std = @import("std");
-const AdapativeRadixTree = @import("art.zig").AdaptiveRadixTree;
+const AdaptiveRadixTree = @import("art.zig").AdaptiveRadixTree;
 
 export fn zig_fuzz_init() void {}
 
@@ -14,7 +14,7 @@ export fn zig_fuzz_test(buf: [*]u8, len: isize) void {
 
     const src = buf[0..@intCast(len)];
 
-    var tree = AdapativeRadixTree(usize).init(gpa);
+    var tree = AdaptiveRadixTree(usize).init(gpa);
     defer tree.deinit();
     var ref = std.StringHashMap(usize).init(arena);
 
