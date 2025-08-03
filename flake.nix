@@ -12,6 +12,9 @@
           zig
           zls
           aflplusplus
+          linuxPackages.perf
+          valgrind
+          flamegraph
         ];
       };
     }

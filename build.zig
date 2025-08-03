@@ -3,14 +3,19 @@ const afl = @import("afl_kit");
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
-
     const optimize = b.standardOptimizeOption(.{});
+    const zbench_module = b.dependency("zbench", .{
+        .target = target,
+        .optimize = optimize,
+    }).module("zbench");
 
     const exe_mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
+        .link_libc = true,
     });
+    exe_mod.addImport("zbench", zbench_module);
 
     const exe = b.addExecutable(.{
         .name = "brewdb",
