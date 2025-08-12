@@ -35,8 +35,10 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Run the app");
     run_step.dependOn(&run_cmd.step);
 
+    const test_filters = b.option([]const []const u8, "test-filters", "Skip tests that do not match the filter") orelse &.{};
     const exe_unit_tests = b.addTest(.{
         .root_module = exe_mod,
+        .filters = test_filters,
     });
 
     const lldb = b.addSystemCommand(&.{ "gdb", "-tui", "--" });
