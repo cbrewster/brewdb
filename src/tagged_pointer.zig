@@ -1,34 +1,47 @@
 const std = @import("std");
 
-/// TaggedPointer is a compile-time construct that allows you to create a pointer
-/// which can hold a tag indicating the type of the pointed-to data.
-///
-/// The tag is stored in the least significant bits of the pointer which are
-/// guaranteed to be unused due to the alignment of the pointed-to data.
-///
-/// The size of the tag is determined by the minimum alignment of all of the
-/// possible types that can be pointed to.
-///
-/// In the future, we could utilize the most significant bits of the pointer
-/// since those are likely to be unused on most platforms.
-pub fn TaggedPointer(comptime fields: anytype) type {
-    if (@typeInfo(@TypeOf(fields)) != .@"struct") {
-        @compileError("TaggedPointer requires a struct type");
+pub fn TaggedPointer(comptime T: type) type {
+    const typeInfo = @typeInfo(T);
+    if (typeInfo != .@"union" or typeInfo.@"union".tag_type == null) {
+        @compileError("TaggedPointer requires a union(enum) type");
     }
+    const unionInfo = typeInfo.@"union";
+
+    const TagEnum = unionInfo.tag_type.?;
+    const TagInt = @typeInfo(unionInfo.tag_type.?).@"enum".tag_type;
 
     return struct {
         const Self = @This();
         pointer: usize,
 
+        pub const Union = T;
+
         comptime {
             std.debug.assert(@sizeOf(@This()) == @sizeOf(usize));
+
+            const tagIntBits = @typeInfo(TagInt).int.bits;
+
+            if (tagIntBits > TAG_BIT_COUNT) {
+                @compileError(std.fmt.comptimePrint(
+                    "TaggedPointer does not have enough low bits to represent the union(enum). Has {}, needs {}",
+                    .{ tagIntBits, TAG_BIT_COUNT },
+                ));
+            }
+
+            if (!@typeInfo(TagEnum).@"enum".is_exhaustive) {
+                @compileError("TaggedPointer requires exhaustive union(enum)");
+            }
         }
 
         const min_alignment = blk: {
-            const f = std.meta.fields(@TypeOf(fields));
+            const fields = std.meta.fields(T);
             var min: ?comptime_int = null;
-            for (f) |field| {
-                const field_type = @field(fields, field.name);
+            for (fields) |field| {
+                const field_type = field.type;
+                if (@typeInfo(field_type) != .pointer) {
+                    @compileError("TaggedPointer variant must always be a pointer");
+                }
+
                 if (min == null or std.meta.alignment(field_type) < min.?) {
                     min = std.meta.alignment(field_type);
                 }
@@ -43,81 +56,39 @@ pub fn TaggedPointer(comptime fields: anytype) type {
                     .{min.?},
                 ));
             }
+
             break :blk min.?;
         };
 
-        const bit_count = std.math.log2_int(usize, min_alignment);
-        const tag_mask: usize = (1 << bit_count) - 1;
-        const ptr_mask: usize = ~tag_mask;
-
-        const TagInt = blk: {
-            const f = std.meta.fields(@TypeOf(fields));
-
-            const tagInt = @Type(.{ .int = std.builtin.Type.Int{
-                .bits = bit_count,
-                .signedness = .unsigned,
-            } });
-
-            if (f.len > std.math.maxInt(tagInt)) {
-                @compileError(std.fmt.comptimePrint(
-                    "TaggedPointer with current alignment can only represent {} fields, but got {}",
-                    .{ std.math.maxInt(tagInt), f.len },
-                ));
-            }
-
-            break :blk tagInt;
-        };
-
-        const Tag = blk: {
-            const f = std.meta.fields(@TypeOf(fields));
-            var enum_fields: [f.len]std.builtin.Type.EnumField = undefined;
-            var tag_to_type_mut: [f.len]type = undefined;
-            for (f, 0..) |field, i| {
-                enum_fields[i] = std.builtin.Type.EnumField{
-                    .name = field.name,
-                    .value = @as(TagInt, @intCast(i)),
-                };
-                tag_to_type_mut[i] = @field(fields, field.name);
-            }
-
-            break :blk @Type(.{ .@"enum" = std.builtin.Type.Enum{
-                .fields = &enum_fields,
-                .decls = &.{},
-                .is_exhaustive = true,
-                .tag_type = TagInt,
-            } });
-        };
-
-        const tag_to_type = blk: {
-            const f = std.meta.fields(@TypeOf(fields));
-            var mapping: [f.len]type = undefined;
-            for (f, 0..) |field, i| {
-                mapping[i] = @field(fields, field.name);
-            }
-            break :blk mapping;
-        };
+        const TAG_BIT_COUNT = std.math.log2_int(usize, min_alignment);
+        const TAG_MASK: usize = (1 << TAG_BIT_COUNT) - 1;
+        const PTR_MASK: usize = ~TAG_MASK;
 
         /// Initializes a TaggedPointer with the given tag and pointer.
-        pub fn init(comptime tag: Tag, ptr: *tag_to_type[@intFromEnum(tag)]) Self {
-            const tag_value = @as(TagInt, @intCast(@intFromEnum(tag)));
-            std.debug.assert(tag_value & tag_mask == tag_value);
-            return Self{ .pointer = @intFromPtr(ptr) | tag_value };
-        }
+        pub fn init(value: T) Self {
+            const tag_value = @intFromEnum(value);
+            std.debug.assert(tag_value & TAG_MASK == tag_value);
 
-        /// Returns the pointer to the data if the tag matches, or null if it does not.
-        pub fn get(self: Self, comptime tag: Tag) ?*tag_to_type[@intFromEnum(tag)] {
-            const tag_value = @as(TagInt, @intCast(@intFromEnum(tag)));
-            std.debug.assert(tag_value & tag_mask == tag_value);
-            if ((self.pointer & tag_mask) != tag_value) {
-                return null;
+            switch (value) {
+                inline else => |ptr| {
+                    std.debug.assert(@typeInfo(@TypeOf(ptr)) == .pointer);
+                    return Self{ .pointer = @intFromPtr(ptr) | tag_value };
+                },
             }
-            return @ptrFromInt(self.pointer & ptr_mask);
         }
 
-        /// Returns the pointer to the data assuming the tag matches.
-        /// If the tag does not match, it will panic.
-        pub fn as(self: Self, comptime tag: Tag) *tag_to_type[@intFromEnum(tag)] {
-            return self.get(tag).?;
+        /// Returns the pointer represented as a tagged union.
+        pub fn get(self: Self) T {
+            const tag: TagEnum = @enumFromInt(self.pointer & TAG_MASK);
+            const ptr = self.pointer & PTR_MASK;
+
+            inline for (unionInfo.fields) |field| {
+                if (tag == @field(TagEnum, field.name)) {
+                    return @unionInit(T, field.name, @ptrFromInt(ptr));
+                }
+            }
+
+            unreachable;
         }
     };
 }
@@ -130,14 +101,13 @@ test TaggedPointer {
         leaf: u64,
     };
 
-    const TaggedNode = TaggedPointer(.{
-        .inner = InnerNode,
-        .leaf = LeafNode,
+    const TaggedNode = TaggedPointer(union(enum) {
+        inner: *InnerNode,
+        leaf: *LeafNode,
     });
+
     var inner = InnerNode{ .inner = 42 };
-    const node = TaggedNode.init(.inner, &inner);
-    try std.testing.expectEqual(null, node.get(.leaf));
-    try std.testing.expectEqual(&inner, node.get(.inner));
-    const i: *InnerNode = node.get(.inner).?;
+    const node = TaggedNode.init(.{ .inner = &inner });
+    const i: *InnerNode = node.get().inner;
     try std.testing.expectEqual(42, i.inner);
 }
