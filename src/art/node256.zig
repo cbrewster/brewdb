@@ -1,6 +1,6 @@
 const std = @import("std");
 const inner_node = @import("inner_node.zig");
-const InnerNodeHeader = inner_node.InnerNodeHeader;
+const InnerNode = inner_node.InnerNode;
 const NodeRef = @import("node.zig").NodeRef;
 const NodeLeaf = @import("node_leaf.zig").NodeLeaf;
 const util = @import("util.zig");
@@ -11,7 +11,7 @@ pub fn Node256(comptime T: type) type {
         const Self = @This();
         const MAX_CHILDREN: u16 = 256;
 
-        header: InnerNodeHeader = .{},
+        header: InnerNode(T) = .{ .kind = .node256 },
         children: [MAX_CHILDREN]?NodeRef(T) = [_]?NodeRef(T){null} ** MAX_CHILDREN,
 
         pub fn init(gpa: std.mem.Allocator) !*Self {
@@ -27,6 +27,10 @@ pub fn Node256(comptime T: type) type {
                 }
             }
             gpa.destroy(self);
+        }
+
+        pub fn isFull(self: *const Self) bool {
+            return self.header.num_children == MAX_CHILDREN;
         }
 
         pub fn print(

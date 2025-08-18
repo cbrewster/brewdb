@@ -1,6 +1,6 @@
 const std = @import("std");
 const inner_node = @import("inner_node.zig");
-const InnerNodeHeader = inner_node.InnerNodeHeader;
+const InnerNode = inner_node.InnerNode;
 const NodeRef = @import("node.zig").NodeRef;
 const Node48 = @import("node48.zig").Node48;
 const NodeLeaf = @import("node_leaf.zig").NodeLeaf;
@@ -14,7 +14,7 @@ pub fn Node16(comptime T: type) type {
 
         pub const MAX_CHILDREN: u16 = 16;
 
-        header: InnerNodeHeader = .{},
+        header: InnerNode(T) = .{ .kind = .node16 },
         key: [MAX_CHILDREN]u8 = [_]u8{0} ** MAX_CHILDREN,
         children: [MAX_CHILDREN]?NodeRef(T) = [_]?NodeRef(T){null} ** MAX_CHILDREN,
 
@@ -31,6 +31,10 @@ pub fn Node16(comptime T: type) type {
                 }
             }
             gpa.destroy(self);
+        }
+
+        pub fn isFull(self: *const Self) bool {
+            return self.header.num_children == MAX_CHILDREN;
         }
 
         pub fn print(
@@ -87,7 +91,7 @@ pub fn Node16(comptime T: type) type {
             insertAt(?NodeRef(T), self.children[0..self.header.num_children], index, child);
         }
 
-        pub fn grow(self: *Self, gpa: std.mem.Allocator) !NodeRef(T) {
+        pub fn grow(self: *Self, gpa: std.mem.Allocator) !*InnerNode(T) {
             std.debug.assert(self.header.num_children == MAX_CHILDREN);
 
             const new_node = try Node48(T).init(gpa);
@@ -101,7 +105,7 @@ pub fn Node16(comptime T: type) type {
             }
             // Ownership of the children is transferred to the new node.
             self.header.num_children = 0;
-            return NodeRef(T).init(.{ .node48 = new_node });
+            return &new_node.header;
         }
 
         pub fn min(self: *const Self) *const NodeLeaf(T) {

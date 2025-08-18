@@ -2,6 +2,7 @@ const std = @import("std");
 const NodeRef = @import("node.zig").NodeRef;
 const NodeLeaf = @import("node_leaf.zig").NodeLeaf;
 const Node4 = @import("node4.zig").Node4;
+const InnerNode = @import("inner_node.zig").InnerNode;
 const util = @import("util.zig");
 const commonPrefixLength = util.commonPrefixLength;
 const charAt = util.charAt;
@@ -51,19 +52,22 @@ pub fn AdaptiveRadixTree(comptime T: type) type {
 
         fn search(maybe_node: ?NodeRef(T), key: []const u8, depth: u64) ?*NodeLeaf(T) {
             const node = maybe_node orelse return null;
-            if (node.ptr.get() == .leaf) {
-                const nodeLeaf = node.ptr.get().leaf;
-                if (std.mem.eql(u8, nodeLeaf.key, key)) {
-                    return nodeLeaf;
-                }
-                return null;
+            switch (node.ptr.get()) {
+                .leaf => |node_leaf| {
+                    if (std.mem.eql(u8, node_leaf.key, key)) {
+                        return node_leaf;
+                    }
+                    return null;
+                },
+                .inner => |node_inner| {
+                    if (node_inner.checkPrefix(key, depth) != node_inner.prefix_len) {
+                        return null;
+                    }
+                    const new_depth = depth + node_inner.prefix_len;
+                    const child = node_inner.findChild(charAt(key, new_depth)) orelse return null;
+                    return search(child.*, key, new_depth + 1);
+                },
             }
-            if (node.checkPrefix(key, depth) != node.getHeader().prefix_len) {
-                return null;
-            }
-            const new_depth = depth + node.getHeader().prefix_len;
-            const child = node.findChild(charAt(key, new_depth)) orelse return null;
-            return search(child.*, key, new_depth + 1);
         }
 
         pub fn format(
@@ -99,77 +103,78 @@ pub fn AdaptiveRadixTree(comptime T: type) type {
                 return null;
             };
 
-            if (node.ptr.get() == .leaf) {
-                const nodeLeaf = node.ptr.get().leaf;
-                // If the keys of the two leaves match, the old leaf will be deleted and replaced by the new node.
-                // TODO: As an optimization we could defer the allocation of the new leaf so we could
-                // update the existing leaf in-place instead.
-                if (std.mem.eql(u8, nodeLeaf.key, key)) {
-                    const old_value = nodeLeaf.value;
-                    nodeLeaf.value = value;
-                    return old_value;
-                }
+            switch (node.ptr.get()) {
+                .leaf => |node_leaf| {
+                    // If the keys of the two leaves match, the old leaf will be deleted and replaced by the new node.
+                    if (std.mem.eql(u8, node_leaf.key, key)) {
+                        const old_value = node_leaf.value;
+                        node_leaf.value = value;
+                        return old_value;
+                    }
 
-                const leaf = try NodeLeaf(T).init(self.gpa, key, value);
-                errdefer leaf.deinit(self.gpa);
+                    const leaf = try NodeLeaf(T).init(self.gpa, key, value);
+                    errdefer leaf.deinit(self.gpa);
 
-                maybe_node.* = try splitLeaf(
-                    self.gpa,
-                    nodeLeaf,
-                    leaf,
-                    depth,
-                );
-                return null;
+                    const new_node = try splitLeaf(
+                        self.gpa,
+                        node_leaf,
+                        leaf,
+                        depth,
+                    );
+                    maybe_node.* = new_node.asNodeRef();
+                    return null;
+                },
+                .inner => |node_inner| {
+                    // Since we store prefixes in the inner nodes, we need to check to see
+                    // if this node requires the inner node to be split.
+
+                    const match_len = node_inner.checkPrefix(key, depth);
+                    if (match_len != node_inner.prefix_len) {
+                        const leaf = try NodeLeaf(T).init(self.gpa, key, value);
+                        errdefer leaf.deinit(self.gpa);
+
+                        const new_node = try splitInner(
+                            self.gpa,
+                            node_inner,
+                            leaf,
+                            depth,
+                            match_len,
+                        );
+                        maybe_node.* = new_node.asNodeRef();
+                        return null;
+                    }
+
+                    // Continue traversing down the tree, if we find another child node, we will
+                    // recurse back into this function until we hit a leaf or a hole.
+                    const new_depth = depth + node_inner.prefix_len;
+                    if (node_inner.findChild(charAt(key, new_depth))) |next| {
+                        // We add 1 to the depth to account for the key byte stored in the inner node.
+                        return try self.insertInner(next, key, value, new_depth + 1);
+                    }
+
+                    // At this point there are no more child nodes, this means the key didn't
+                    // already exist in the tree and we are now ready to insert the node directly
+                    // into the tree.
+                    //
+                    const leaf = try NodeLeaf(T).init(self.gpa, key, value);
+                    errdefer leaf.deinit(self.gpa);
+
+                    // If the current node is full, we will grow the node by allocating a
+                    // new node, copying the children over, and deallocating the old node.
+
+                    if (node_inner.isFull()) {
+                        const new_node = try node_inner.grow(self.gpa);
+                        errdefer new_node.deinit(self.gpa);
+                        new_node.addChild(charAt(key, new_depth), NodeRef(T).init(.{ .leaf = leaf }));
+                        node_inner.deinit(self.gpa);
+                        maybe_node.* = new_node.asNodeRef();
+                        return null;
+                    }
+
+                    node_inner.addChild(charAt(key, new_depth), NodeRef(T).init(.{ .leaf = leaf }));
+                    return null;
+                },
             }
-
-            // Since we store prefixes in the inner nodes, we need to check to see
-            // if this node requires the inner node to be split.
-
-            const node_header = node.getHeader();
-            const match_len = node.checkPrefix(key, depth);
-            if (match_len != node.getHeader().prefix_len) {
-                const leaf = try NodeLeaf(T).init(self.gpa, key, value);
-                errdefer leaf.deinit(self.gpa);
-
-                maybe_node.* = try splitInner(
-                    self.gpa,
-                    node,
-                    leaf,
-                    depth,
-                    match_len,
-                );
-                return null;
-            }
-
-            // Continue traversing down the tree, if we find another child node, we will
-            // recurse back into this function until we hit a leaf or a hole.
-            const new_depth = depth + node_header.prefix_len;
-            if (node.findChild(charAt(key, new_depth))) |next| {
-                // We add 1 to the depth to account for the key byte stored in the inner node.
-                return try self.insertInner(next, key, value, new_depth + 1);
-            }
-
-            // At this point there are no more child nodes, this means the key didn't
-            // already exist in the tree and we are now ready to insert the node directly
-            // into the tree.
-            //
-            const leaf = try NodeLeaf(T).init(self.gpa, key, value);
-            errdefer leaf.deinit(self.gpa);
-
-            // If the current node is full, we will grow the node by allocating a
-            // new node, copying the children over, and deallocating the old node.
-
-            if (node.isFull()) {
-                const new_node = try node.grow(self.gpa);
-                errdefer new_node.deinit(self.gpa);
-                new_node.addChild(charAt(key, new_depth), NodeRef(T).init(.{ .leaf = leaf }));
-                node.deinit(self.gpa);
-                maybe_node.* = new_node;
-                return null;
-            }
-
-            node.addChild(charAt(key, new_depth), NodeRef(T).init(.{ .leaf = leaf }));
-            return null;
         }
 
         /// Given a non-leaf node and a leaf node that needs to be inserted where the leaf node
@@ -197,12 +202,12 @@ pub fn AdaptiveRadixTree(comptime T: type) type {
         ///
         fn splitInner(
             gpa: std.mem.Allocator,
-            node: NodeRef(T),
+            node: *InnerNode(T),
             leaf: *NodeLeaf(T),
             depth: u64,
             common_prefix_len: u64,
-        ) !NodeRef(T) {
-            const new_node = NodeRef(T).init(.{ .node4 = try Node4(T).init(gpa) });
+        ) !*InnerNode(T) {
+            const new_node = &(try Node4(T).init(gpa)).header;
             errdefer new_node.deinit(gpa);
 
             var node_partial_key = node.getPrefix(depth);
@@ -216,7 +221,7 @@ pub fn AdaptiveRadixTree(comptime T: type) type {
             // Before mucking with the prefix keys, add the nodes to the new parent
             // using the first differentiating character in each's key.
             new_node.addChild(charAt(leaf_key, new_depth), NodeRef(T).init(.{ .leaf = leaf }));
-            new_node.addChild(charAt(node_partial_key, common_prefix_len), node);
+            new_node.addChild(charAt(node_partial_key, common_prefix_len), node.asNodeRef());
 
             // Update the new node to have the common prefix of the two nodes.
             // No need to copy forward as the slices do not overlap.
@@ -250,8 +255,8 @@ pub fn AdaptiveRadixTree(comptime T: type) type {
             leaf_a: *NodeLeaf(T),
             leaf_b: *NodeLeaf(T),
             depth: u64,
-        ) !NodeRef(T) {
-            const new_node = NodeRef(T).init(.{ .node4 = try Node4(T).init(gpa) });
+        ) !*InnerNode(T) {
+            const new_node = &(try Node4(T).init(gpa)).header;
             errdefer new_node.deinit(gpa);
 
             const leaf_a_key = leaf_a.key;
@@ -365,7 +370,7 @@ test "splitNode with small prefix" {
     defer inner_b.deinit(gpa);
 
     try testing.expectEqualStrings("A", inner_b.getPrefix(0));
-    try testing.expectEqualStrings("", inner_a.getPrefix(inner_b.getHeader().prefix_len));
+    try testing.expectEqualStrings("", inner_a.getPrefix(inner_b.prefix_len));
 }
 
 test "splitNode with large prefix" {
@@ -395,6 +400,6 @@ test "splitNode with large prefix" {
     try testing.expectEqualStrings("123456789_", inner_b.getPrefix(0));
     try testing.expectEqualStrings(
         "/123456789_",
-        inner_a.getPrefix(inner_b.getHeader().prefix_len + 1),
+        inner_a.getPrefix(inner_b.prefix_len + 1),
     );
 }
