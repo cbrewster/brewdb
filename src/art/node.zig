@@ -1,7 +1,5 @@
 const std = @import("std");
 
-const util = @import("util.zig");
-const commonPrefixLength = util.commonPrefixLength;
 const TaggedPointer = @import("../tagged_pointer.zig").TaggedPointer;
 const inner_node = @import("inner_node.zig");
 const InnerNode = inner_node.InnerNode;
