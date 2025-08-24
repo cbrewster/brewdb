@@ -23,8 +23,8 @@ pub fn NodeLeaf(comptime T: type) type {
             gpa.destroy(self);
         }
 
-        pub fn print(self: *const Self, writer: anytype) anyerror!void {
-            try std.fmt.format(writer, "\"{s}\" = {}", .{ self.key, self.value });
+        pub fn print(self: *const Self, writer: *std.Io.Writer) std.io.Writer.Error!void {
+            try writer.print("\"{s}\" = {any}", .{ self.key, self.value });
         }
     };
 }

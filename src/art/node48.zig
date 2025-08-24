@@ -40,17 +40,17 @@ pub fn Node48(comptime T: type) type {
 
         pub fn print(
             self: *const Self,
-            writer: anytype,
+            writer: *std.io.Writer,
             depth: u64,
             indent: u64,
-        ) anyerror!void {
+        ) std.io.Writer.Error!void {
             for (self.key, 0..) |index, key| {
                 if (index == EMPTY) continue;
 
                 const child = self.children[index];
-                try std.fmt.format(writer, "\n", .{});
+                try writer.print("\n", .{});
                 try pad(writer, indent);
-                try std.fmt.format(writer, "\"{c}\": ", .{@as(u8, @intCast(key))});
+                try writer.print("\"{c}\": ", .{@as(u8, @intCast(key))});
                 try child.?.print(writer, depth + 1 + self.header.prefix_len, indent);
             }
         }

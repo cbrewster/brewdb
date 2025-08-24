@@ -56,17 +56,17 @@ pub fn NodeRef(comptime T: type) type {
 
         pub fn print(
             self: *const Self,
-            writer: anytype,
+            writer: *std.Io.Writer,
             depth: u64,
             indent: u64,
-        ) !void {
+        ) std.io.Writer.Error!void {
             switch (self.ptr.get()) {
                 .inner => |inner| try inner.print(writer, depth, indent + 1),
                 .leaf => |leaf| try leaf.print(writer),
             }
 
             if (indent == 0) {
-                try std.fmt.format(writer, "\n", .{});
+                try writer.print("\n", .{});
             }
         }
     };

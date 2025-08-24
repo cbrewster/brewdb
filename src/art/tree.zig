@@ -72,16 +72,12 @@ pub fn AdaptiveRadixTree(comptime T: type) type {
 
         pub fn format(
             self: *const Self,
-            comptime fmt: []const u8,
-            options: std.fmt.FormatOptions,
-            writer: anytype,
-        ) !void {
-            _ = fmt;
-            _ = options;
+            writer: *std.io.Writer,
+        ) error{WriteFailed}!void {
             if (self.root) |root| {
                 try root.print(writer, 0, 0);
             } else {
-                try std.fmt.format(writer, "<empty tree>", .{});
+                try writer.print("<empty tree>", .{});
             }
         }
 

@@ -36,7 +36,7 @@ test "fuzz AdapativeRadixTree" {
                                 expected,
                                 actual,
                             });
-                            std.debug.print("Tree: {}\n", .{tree});
+                            std.debug.print("Tree: {f}\n", .{tree});
                             @panic("mismatch in get operation");
                         }
                     },
@@ -50,13 +50,8 @@ test "fuzz AdapativeRadixTree" {
 
             pub fn format(
                 self: @This(),
-                comptime fmt: []const u8,
-                options: std.fmt.FormatOptions,
-                writer: anytype,
-            ) !void {
-                _ = options;
-                _ = fmt;
-
+                writer: *std.io.Writer,
+            ) std.io.Writer.Error!void {
                 switch (self) {
                     .insert => |data| {
                         try writer.print("\x1b[32mINSERT\x1b[0m \x1b[36m\"{s}\"\x1b[0m \x1b[33m= {}\x1b[0m", .{ data.key, data.value });

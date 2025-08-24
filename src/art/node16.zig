@@ -39,17 +39,17 @@ pub fn Node16(comptime T: type) type {
 
         pub fn print(
             self: *const Self,
-            writer: anytype,
+            writer: *std.io.Writer,
             depth: u64,
             indent: u64,
-        ) anyerror!void {
+        ) std.io.Writer.Error!void {
             for (
                 self.key[0..self.header.num_children],
                 self.children[0..self.header.num_children],
             ) |key, child| {
-                try std.fmt.format(writer, "\n", .{});
+                try writer.print("\n", .{});
                 try pad(writer, indent);
-                try std.fmt.format(writer, "\"{c}\": ", .{key});
+                try writer.print("\"{c}\": ", .{key});
                 try child.?.print(writer, depth + 1 + self.header.prefix_len, indent);
             }
         }

@@ -180,11 +180,11 @@ pub fn InnerNode(comptime T: type) type {
 
         pub fn print(
             self: *Self,
-            writer: anytype,
+            writer: *std.io.Writer,
             depth: u64,
             indent: u64,
-        ) anyerror!void {
-            try std.fmt.format(writer, "Prefix \"{s}\" {s}", .{
+        ) std.io.Writer.Error!void {
+            try writer.print("Prefix \"{s}\" {s}", .{
                 self.getPrefix(depth),
                 @tagName(self.kind),
             });

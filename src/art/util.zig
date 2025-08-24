@@ -60,8 +60,8 @@ pub fn commonPrefixLength(a: []const u8, b: []const u8) u64 {
     return pos;
 }
 
-pub fn pad(writer: anytype, amount: u64) !void {
-    for (0..amount) |_| try std.fmt.format(writer, "\t", .{});
+pub fn pad(writer: *std.io.Writer, amount: u64) !void {
+    try writer.splatByteAll('\t', amount);
 }
 
 test commonPrefix {
